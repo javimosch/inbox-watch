@@ -103,6 +103,38 @@ def dh(s):
         return out
     except Exception: return s
 
+def resend_check(state):
+    # Resend inbound: mail delivered to a receiving-enabled Resend domain
+    # (reply.intrane.fr) is pollable via GET /emails/inbound — no Zoho, we hold the key.
+    # Route outreach replies here by using reply-to replies@reply.intrane.fr (future sends),
+    # or a one-time Zoho forward javi@intrane.fr -> replies@reply.intrane.fr (past sends).
+    import urllib.request
+    key = os.environ.get("RESEND_API_KEY","")
+    if not key:
+        return [], "resend: set RESEND_API_KEY to enable inbound polling (reply.intrane.fr receiving)"
+    items = []
+    try:
+        # Resend 403s the default Python-urllib User-Agent — set a real one.
+        req = urllib.request.Request("https://api.resend.com/emails/inbound",
+                                     headers={"Authorization": f"Bearer {key}",
+                                              "User-Agent": "inbox-watch/1.0"})
+        data = json.load(urllib.request.urlopen(req, timeout=30)).get("data", [])
+        seen = set(state.get("resend_inbound_ids", []))
+        newseen = list(seen)
+        for e in data:
+            eid = str(e.get("id") or (str(e.get("from","")) + str(e.get("created_at",""))))
+            if eid in seen: continue
+            newseen.append(eid)
+            frm = e.get("from","")
+            if isinstance(frm, dict): frm = frm.get("email") or frm.get("address") or str(frm)
+            items.append({"channel":"resend","kind":"reply","from":frm,
+                          "title":e.get("subject",""),"url":"https://resend.com/emails",
+                          "ts":e.get("created_at", e.get("created",""))})
+        state["resend_inbound_ids"] = newseen[-1000:]
+    except Exception as ex:
+        return [], f"resend: {ex}"
+    return items, None
+
 def linkedin_check(state):
     # No LinkedIn notifications API. The authed hidden-Edge/CDP session
     # (~/.config/intrane-gtm/li_at) exists, but a notifications-page fetcher is not
@@ -118,7 +150,7 @@ def main():
     human = "--human" in args
     state = load_state()
     all_items, errs = [], []
-    for fn in (gh_check, zoho_check, linkedin_check):
+    for fn in (gh_check, resend_check, zoho_check, linkedin_check):
         items, err = fn(state)
         all_items += items
         if err: errs.append(err)
@@ -138,9 +170,11 @@ def main():
 SETUP = """inbox-watch — enable each channel:
 
   github    ready (uses `gh`, already authenticated). No setup.
-  zoho      export ZOHO_IMAP_PASS=<Zoho app-specific password>
-            (Zoho Mail > Settings > Security > App Passwords; IMAP must be ON.
-             defaults: user javi@intrane.fr, host imap.zoho.eu)
+  resend    export RESEND_API_KEY=<re_...>  — polls Resend inbound (reply.intrane.fr,
+            receiving-enabled). The Zoho-free path: route replies here via reply-to
+            replies@reply.intrane.fr, or a one-time Zoho forward javi@ -> that address.
+  zoho      export ZOHO_IMAP_PASS=<app pw>  — IMAP fallback (needs per-user IMAP toggle
+            + username = the app-password owner, e.g. contact@intrane.fr). Painful; prefer resend.
   linkedin  needs a notifications-page fetcher (CDP scraper of /notifications
             using the existing ~/.config/intrane-gtm/li_at session). Not built.
 
