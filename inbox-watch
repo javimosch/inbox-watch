@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""inbox-watch — non-interactive poller for the intrane outreach inboxes.
+Prints NEW items since last run (JSON by default). Exit 10 if new items found, else 0.
+Channels: github (ready), zoho (needs ZOHO_IMAP_PASS), linkedin (needs notif fetcher).
+State: ~/.inbox-watch/state.json (per-channel last-seen marker)."""
+import os, sys, json, subprocess, datetime, imaplib, email, ssl
+from email.header import decode_header
+
+STATE = os.path.expanduser("~/.inbox-watch/state.json")
+GH_WATCH_REPOS = ["javimosch/peage","javimosch/relais","javimosch/portier",
+                  "javimosch/machin-idp","javimosch/peage-mcp","javimosch/machin"]
+X402_THREAD = ("x402-foundation/x402", 2612)   # your fiat-binding comment lives here
+
+def load_state():
+    try: return json.load(open(STATE))
+    except Exception: return {}
+def save_state(s):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True); json.dump(s, open(STATE,"w"))
+
+def sh(args):
+    return subprocess.run(args, capture_output=True, text=True, timeout=60)
+
+def gh_check(state):
+    items, err = [], None
+    try:
+        # 1. unread GitHub notifications (mentions, comments, review requests)
+        r = sh(["gh","api","/notifications","--jq",
+                '.[] | {reason, title: .subject.title, type: .subject.type, url: .subject.url, updated: .updated_at, repo: .repository.full_name}'])
+        seen = set(state.get("github_notif_seen", []))
+        newseen = list(seen)
+        # signal only: our product repos, OR notifications that directly involve you
+        SIGNAL_REASONS = {"mention","comment","review_requested","team_mention"}
+        for line in r.stdout.splitlines():
+            if not line.strip(): continue
+            n = json.loads(line)
+            repo = n.get("repo") or ""
+            reason = n.get("reason") or ""
+            if reason not in SIGNAL_REASONS:
+                continue  # inbound only: drop ci_activity, author, subscribed, state_change
+            key = (n.get("url") or n.get("title","")) + (n.get("updated") or "")
+            if key in seen: continue
+            newseen.append(key)
+            items.append({"channel":"github","kind":reason,"from":repo,
+                          "title":n.get("title",""),"url":api_to_html(n.get("url") or ""),"ts":n.get("updated","")})
+        state["github_notif_seen"] = newseen[-500:]
+        # 2. new comments on the x402 fiat-binding thread (highest-signal external)
+        repo, num = X402_THREAD
+        r2 = sh(["gh","api",f"/repos/{repo}/issues/{num}/comments","--jq",
+                 '.[] | {id, user: .user.login, ts: .created_at, url: .html_url}'])
+        xseen = set(state.get("x402_comment_ids", []))
+        for line in r2.stdout.splitlines():
+            if not line.strip(): continue
+            c = json.loads(line)
+            if str(c["id"]) in xseen: continue
+            xseen.add(str(c["id"]))
+            if c["user"] != "javimosch" and not c["user"].endswith("[bot]"):
+                items.append({"channel":"github","kind":"x402-reply","from":c["user"],
+                              "title":f"comment on x402 PR #{num}","url":c["url"],"ts":c["ts"]})
+        state["x402_comment_ids"] = sorted(xseen)[-300:]
+    except Exception as e:
+        err = f"github: {e}"
+    return items, err
+
+def api_to_html(u):
+    if not u: return ""
+    return u.replace("https://api.github.com/repos/","https://github.com/").replace("/pulls/","/pull/")
+
+def zoho_check(state):
+    pw = os.environ.get("ZOHO_IMAP_PASS")
+    if not pw:
+        return [], "zoho: set ZOHO_IMAP_PASS (Zoho app-specific password) to enable — see 'inbox-watch setup'"
+    user = os.environ.get("ZOHO_IMAP_USER","javi@intrane.fr")
+    host = os.environ.get("ZOHO_IMAP_HOST","imap.zoho.eu")
+    items = []
+    try:
+        M = imaplib.IMAP4_SSL(host, 993, ssl_context=ssl.create_default_context())
+        M.login(user, pw); M.select("INBOX")
+        typ, data = M.search(None, "UNSEEN")
+        last = set(state.get("zoho_seen_uids", []))
+        newlast = list(last)
+        for numid in data[0].split():
+            typ, msg_data = M.fetch(numid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+            raw = msg_data[0][1].decode(errors="replace")
+            m = email.message_from_string(raw)
+            mid = m.get("Message-ID","") or numid.decode()
+            if mid in last: continue
+            newlast.append(mid)
+            frm = str(m.get("From","")); subj = dh(m.get("Subject",""))
+            # skip our own automated mail (digests, no-reply)
+            if any(x in frm.lower() for x in ("no-reply","noreply","digest","postmaster")): continue
+            items.append({"channel":"zoho","kind":"email","from":frm,"title":subj,
+                          "url":"","ts":str(m.get("Date",""))})
+        state["zoho_seen_uids"] = newlast[-1000:]
+        M.logout()
+    except Exception as e:
+        return [], f"zoho: {e}"
+    return items, None
+
+def dh(s):
+    try:
+        parts = decode_header(s); out=""
+        for t,enc in parts: out += t.decode(enc or "utf-8",errors="replace") if isinstance(t,bytes) else t
+        return out
+    except Exception: return s
+
+def linkedin_check(state):
+    # No LinkedIn notifications API. The authed hidden-Edge/CDP session
+    # (~/.config/intrane-gtm/li_at) exists, but a notifications-page fetcher is not
+    # built. Enable by adding one (scrape /notifications via CDP) and wiring it here.
+    if os.path.exists(os.path.expanduser("~/.config/intrane-gtm/li_at")):
+        return [], "linkedin: authed session present but no notifications fetcher yet — needs a CDP scraper of linkedin.com/notifications"
+    return [], "linkedin: no authed session (~/.config/intrane-gtm/li_at)"
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "setup":
+        print(SETUP); return
+    human = "--human" in args
+    state = load_state()
+    all_items, errs = [], []
+    for fn in (gh_check, zoho_check, linkedin_check):
+        items, err = fn(state)
+        all_items += items
+        if err: errs.append(err)
+    save_state(state)
+    if human:
+        if all_items:
+            for it in all_items:
+                print(f"[{it['channel']}/{it['kind']}] {it['from']}: {it['title']}  {it['url']}")
+        else:
+            print("no new items")
+        for e in errs: print(f"  (disabled) {e}", file=sys.stderr)
+    else:
+        json.dump({"new": all_items, "count": len(all_items), "disabled": errs}, sys.stdout, indent=2)
+        print()
+    sys.exit(10 if all_items else 0)
+
+SETUP = """inbox-watch — enable each channel:
+
+  github    ready (uses `gh`, already authenticated). No setup.
+  zoho      export ZOHO_IMAP_PASS=<Zoho app-specific password>
+            (Zoho Mail > Settings > Security > App Passwords; IMAP must be ON.
+             defaults: user javi@intrane.fr, host imap.zoho.eu)
+  linkedin  needs a notifications-page fetcher (CDP scraper of /notifications
+            using the existing ~/.config/intrane-gtm/li_at session). Not built.
+
+Run:  inbox-watch            # JSON of new items, exit 10 if any
+      inbox-watch --human    # readable
+Schedule (Telegram alert on new): cron/systemd-timer calling this + piping to a notifier."""
+
+if __name__ == "__main__": main()
