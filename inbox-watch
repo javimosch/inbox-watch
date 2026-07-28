@@ -103,6 +103,28 @@ def dh(s):
         return out
     except Exception: return s
 
+# Inbound mail is not all the same thing, and treating it as one stream is why a notification
+# saying "1 new" was usually a DMARC aggregate report. Three kinds:
+#
+#   dmarc     — machine-generated deliverability reports. Real value in AGGREGATE (a spike means
+#               something is wrong with sending), zero value one at a time. Counted, never pinged.
+#   autoreply — out-of-office. Not a reply, but not noise either: it proves the address is live
+#               and a human exists behind it. Pinged, but LABELLED so it reads correctly.
+#   reply     — an actual person typed something. This is what the notification exists for.
+DMARC_FROM = ("dmarc", "dmarcreport", "noreply-dmarc", "mimecastreport", "report@", "postmaster@")
+DMARC_SUBJ = ("report domain:", "report_domain:", "aggregate report", "dmarc aggregate")
+AUTO_SUBJ  = ("automatic reply", "auto-reply", "autoreply", "out of office", "out-of-office",
+              "away from the office", "annual leave", "réponse automatique", "abwesenheit")
+
+def classify_inbound(frm, subject):
+    f = (frm or "").lower()
+    s = (subject or "").lower()
+    if any(k in f for k in DMARC_FROM) or any(s.startswith(k) or k in s for k in DMARC_SUBJ):
+        return "dmarc"
+    if any(s.startswith(k) or k in s for k in AUTO_SUBJ):
+        return "autoreply"
+    return "reply"
+
 def resend_check(state):
     # Resend inbound: mail delivered to a receiving-enabled Resend domain
     # (reply.intrane.fr) is pollable via GET /emails/inbound — no Zoho, we hold the key.
@@ -127,8 +149,10 @@ def resend_check(state):
             newseen.append(eid)
             frm = e.get("from","")
             if isinstance(frm, dict): frm = frm.get("email") or frm.get("address") or str(frm)
-            items.append({"channel":"resend","kind":"reply","from":frm,
-                          "title":e.get("subject",""),"url":"https://resend.com/emails",
+            subject = e.get("subject","")
+            kind = classify_inbound(frm, subject)
+            items.append({"channel":"resend","kind":kind,"from":frm,
+                          "title":subject,"url":"https://resend.com/emails",
                           "ts":e.get("created_at", e.get("created",""))})
         state["resend_inbound_ids"] = newseen[-1000:]
     except Exception as ex:
