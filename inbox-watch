@@ -7,7 +7,27 @@ State: ~/.inbox-watch/state.json (per-channel last-seen marker)."""
 import os, sys, json, subprocess, datetime, imaplib, email, ssl
 from email.header import decode_header
 
-STATE = os.path.expanduser("~/.inbox-watch/state.json")
+# Cursor state. ONE file per consumer, because the cursor is per-consumer by
+# nature: reading an item marks it seen, so two watchers sharing a file steal
+# each other's items -- the second to poll sees nothing and its alert never
+# fires. Default path is unchanged, so an existing deployment keeps its cursor.
+#   --consumer NAME  -> ~/.inbox-watch/state-NAME.json
+#   --state PATH     -> exactly PATH   (env: INBOX_WATCH_STATE)
+def _state_path(argv):
+    for i, a in enumerate(argv):
+        if a == "--state" and i + 1 < len(argv):
+            return os.path.expanduser(argv[i + 1])
+        if a.startswith("--state="):
+            return os.path.expanduser(a.split("=", 1)[1])
+        if a == "--consumer" and i + 1 < len(argv):
+            return os.path.expanduser("~/.inbox-watch/state-%s.json" % argv[i + 1])
+        if a.startswith("--consumer="):
+            return os.path.expanduser("~/.inbox-watch/state-%s.json" % a.split("=", 1)[1])
+    if os.environ.get("INBOX_WATCH_STATE"):
+        return os.path.expanduser(os.environ["INBOX_WATCH_STATE"])
+    return os.path.expanduser("~/.inbox-watch/state.json")
+
+STATE = _state_path(sys.argv)
 GH_WATCH_REPOS = ["javimosch/peage","javimosch/relais","javimosch/portier",
                   "javimosch/machin-idp","javimosch/peage-mcp","javimosch/machin"]
 X402_THREAD = ("x402-foundation/x402", 2612)   # your fiat-binding comment lives here
@@ -212,6 +232,7 @@ def linkedin_check(state):
 
 def main():
     peek = "--peek" in sys.argv
+    seed = "--seed" in sys.argv
 
     args = sys.argv[1:]
     if args and args[0] == "setup":
@@ -230,6 +251,11 @@ def main():
     # own test alert.
     if not peek:
         save_state(state)
+    if seed:
+        # Mark everything seen without reporting it. A fresh consumer would
+        # otherwise alert on the entire backlog on its first run.
+        print(f"seeded {len(all_items)} item(s) as seen -> {STATE}")
+        sys.exit(0)
     if human:
         if all_items:
             for it in all_items:
@@ -248,6 +274,13 @@ SETUP = """inbox-watch — enable each channel:
   intrane-inbox  export INBOX_TOKEN=<tok>   — polls inbox.intrane.fr (javi@/contact@
             intrane.fr inbound) read-only. PREFER THIS over the resend channel: the
             token cannot send, and RESEND_API_KEY can. Token: ~/backups/dk1-machin-resend-inbox/access.txt
+  --consumer NAME   use a separate cursor (~/.inbox-watch/state-NAME.json). REQUIRED
+            if more than one watcher polls the same inbox on one host: the cursor is
+            consumed on read, so watchers sharing a state file steal each other's items.
+  --state PATH      explicit cursor file (env: INBOX_WATCH_STATE)
+  --seed    mark everything currently pending as seen, reporting nothing. Run this
+            once when adding a new consumer, or it alerts on the whole backlog.
+
   --peek    report new items WITHOUT marking them seen — use this for any manual
             or diagnostic run, otherwise you consume the cron's next alert.
 

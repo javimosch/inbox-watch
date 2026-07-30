@@ -31,6 +31,13 @@ notifier holds no send authority. Telegram delivery is logged to journald
 (`inbox-watch: telegram delivered`), so a broken alert path is visible instead of
 silent.
 
+**Multiple watchers on one host need `--consumer`.** The cursor is consumed on
+read, so two watchers sharing a state file steal each other's items — the second
+to poll sees nothing and its alert never fires. `--consumer NAME` gives each its
+own cursor (`~/.inbox-watch/state-NAME.json`); `--state PATH` / `INBOX_WATCH_STATE`
+set one explicitly. Run `--seed` once for a new consumer or it alerts on the whole
+backlog. The default path is unchanged, so an existing deployment keeps its cursor.
+
 **Diagnosing a live watcher: always use `--peek`.** A bare run marks items seen,
 so a manual debug run consumes the alert the cron would have sent. This is not
 theoretical — a verification loop that polled twice per iteration swallowed its
