@@ -23,6 +23,19 @@ alert only when something actually arrives. State: `~/.inbox-watch/state.json`.
 - **Zoho (the important one — outreach replies):** a **Zoho app-specific password**. That's the single missing credential. With it, `inbox-watch` sees replies to your 31 cold emails non-interactively.
 - **LinkedIn:** a bit of code (a notifications-page CDP fetcher), plus the session already present.
 
+## Deployment (live)
+
+dk1: `/opt/inbox-watch/`, `inbox-watch.timer` every 15 min → Telegram. Uses the
+**intrane-inbox** channel (read-only `INBOX_TOKEN`), not `RESEND_API_KEY` — the
+notifier holds no send authority. Telegram delivery is logged to journald
+(`inbox-watch: telegram delivered`), so a broken alert path is visible instead of
+silent.
+
+**Diagnosing a live watcher: always use `--peek`.** A bare run marks items seen,
+so a manual debug run consumes the alert the cron would have sent. This is not
+theoretical — a verification loop that polled twice per iteration swallowed its
+own test alert and looked like a clean pass.
+
 ## Wire it to alert (optional)
 
     */15 * * * *  inbox-watch --human | grep . && <notify: telegram/relais/email>

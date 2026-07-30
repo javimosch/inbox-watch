@@ -11,7 +11,9 @@
 #   autoreply pinged but LABELLED, so an out-of-office does not read as a reply
 #   reply     the thing this exists for
 export HOME=/home/dk1
-export RESEND_API_KEY="__RESEND_API_KEY__"
+# RESEND_API_KEY intentionally NOT set: that key can SEND. INBOX_TOKEN is
+# read-only and sees the same inbound via inbox.intrane.fr (intrane-inbox channel).
+export INBOX_TOKEN="__INBOX_TOKEN__"
 TG_TOKEN="__TG_TOKEN__"
 TG_CHAT="__TG_CHAT__"
 
@@ -42,5 +44,13 @@ if noisy:
 print('\n'.join(L)[:3800])
 ") || exit 0
 
-curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-  --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=${MSG}" >/dev/null
+# Log the delivery result. Discarding it made a failing send indistinguishable
+# from "nothing to report" -- the alerting path could rot silently, which is the
+# exact failure this watcher exists to prevent.
+TG_RESP=$(curl -s -m 20 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+  --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=${MSG}")
+if echo "$TG_RESP" | grep -q '"ok":true'; then
+  echo "inbox-watch: telegram delivered"
+else
+  echo "inbox-watch: TELEGRAM SEND FAILED: ${TG_RESP:0:200}" >&2
+fi
