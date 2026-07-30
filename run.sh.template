@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# inbox-watch → Telegram. Deployed at /opt/inbox-watch/run.sh (secrets filled in there).
+# inbox-watch -> Telegram. Deploy to e.g. /opt/inbox-watch/run.sh with secrets filled in.
 #
 # The poller reports EVERY new inbound item; this decides what is worth interrupting a human
 # for. That separation matters: a DMARC aggregate report is real data (a spike in them means
@@ -10,14 +10,14 @@
 #   dmarc     counted, never pinged on its own
 #   autoreply pinged but LABELLED, so an out-of-office does not read as a reply
 #   reply     the thing this exists for
-export HOME=/home/dk1
+export HOME="${HOME:-/home/youruser}"
 # RESEND_API_KEY intentionally NOT set: that key can SEND. INBOX_TOKEN is
 # read-only and sees the same inbound via inbox.intrane.fr (intrane-inbox channel).
 export INBOX_TOKEN="__INBOX_TOKEN__"
 TG_TOKEN="__TG_TOKEN__"
 TG_CHAT="__TG_CHAT__"
 
-OUT=$(/opt/inbox-watch/inbox-watch 2>/dev/null); RC=$?
+OUT=$("${INBOX_WATCH_BIN:-/opt/inbox-watch/inbox-watch}" 2>/dev/null); RC=$?
 [ "$RC" = "10" ] || exit 0
 
 MSG=$(echo "$OUT" | python3 -c "

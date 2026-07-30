@@ -1,0 +1,32 @@
+{
+  "_comment": "Copy to ~/.inbox-watch/config.json. Secrets never live here — they come from env vars (see `inbox-watch setup`).",
+
+  "mailbox": {
+    "_comment": "A token-gated service exposing GET /api/inbound, e.g. machin-resend-inbox. Token via INBOX_TOKEN. Preferred over `resend`: a read-only token cannot send mail as you.",
+    "url": "https://inbox.example.com"
+  },
+
+  "imap": {
+    "_comment": "Password via ZOHO_IMAP_PASS. Needs an app-specific password and IMAP enabled for this mailbox.",
+    "user": "you@example.com",
+    "host": "imap.example.com"
+  },
+
+  "github": {
+    "_comment": "Needs the authenticated `gh` CLI. `self` is your login, used to ignore your own comments.",
+    "self": "your-github-login",
+    "repos": ["you/project-a", "you/project-b"],
+    "threads": [
+      {
+        "_comment": "Issues/PRs where you left something and want the answer — GitHub buries these under subscribed-repo noise.",
+        "repo": "someorg/somerepo",
+        "number": 1234,
+        "label": "the RFC thread"
+      }
+    ]
+  },
+
+  "linkedin": {
+    "session_file": "~/.config/linkedin/li_at"
+  }
+}

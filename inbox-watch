@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""inbox-watch — non-interactive poller for the intrane outreach inboxes.
-Prints NEW items since last run (JSON by default). Exit 10 if new items found, else 0.
-Channels: github (ready), intrane-inbox (needs INBOX_TOKEN), resend (needs RESEND_API_KEY),
-zoho (needs ZOHO_IMAP_PASS), linkedin (needs notif fetcher).
-State: ~/.inbox-watch/state.json (per-channel last-seen marker)."""
+"""inbox-watch — tell me only when a human actually replied.
+
+A non-interactive poller across GitHub, IMAP and Resend inbound. Prints items
+NEW since the last run (JSON by default), exit 10 if there were any, else 0 --
+so a cron or systemd timer alerts only when something real arrived.
+
+The point is not polling, it is triage. Inbound mail is mostly machine noise:
+DMARC aggregate reports, out-of-office autoreplies, CI chatter. A notifier that
+pings for all of it gets muted, and then the reply that mattered is muted with
+it. So every item is classified dmarc / autoreply / reply, and only `reply` is
+a human typing something.
+
+Config: ~/.inbox-watch/config.json (see config.example.json). Env vars carry
+secrets and override the file.
+State:  ~/.inbox-watch/state.json, or per-consumer via --consumer NAME."""
 import os, sys, json, subprocess, datetime, imaplib, email, ssl
 from email.header import decode_header
 
@@ -28,9 +38,30 @@ def _state_path(argv):
     return os.path.expanduser("~/.inbox-watch/state.json")
 
 STATE = _state_path(sys.argv)
-GH_WATCH_REPOS = ["javimosch/peage","javimosch/relais","javimosch/portier",
-                  "javimosch/machin-idp","javimosch/peage-mcp","javimosch/machin"]
-X402_THREAD = ("x402-foundation/x402", 2612)   # your fiat-binding comment lives here
+
+# ---- configuration -------------------------------------------------------
+# Everything site-specific lives in a config file, never in the source. Absent
+# config is not an error: each channel reports itself disabled with the reason,
+# so a fresh clone runs and tells you what it needs.
+CONFIG_PATH = os.path.expanduser(
+    os.environ.get("INBOX_WATCH_CONFIG", "~/.inbox-watch/config.json"))
+
+def load_config():
+    try:
+        return json.load(open(CONFIG_PATH))
+    except Exception:
+        return {}
+
+CFG = load_config()
+
+def cfg(path, default=None):
+    """cfg("github.repos", []) -> nested lookup with a default."""
+    cur = CFG
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
 
 def load_state():
     try: return json.load(open(STATE))
@@ -64,20 +95,28 @@ def gh_check(state):
             items.append({"channel":"github","kind":reason,"from":repo,
                           "title":n.get("title",""),"url":api_to_html(n.get("url") or ""),"ts":n.get("updated","")})
         state["github_notif_seen"] = newseen[-500:]
-        # 2. new comments on the x402 fiat-binding thread (highest-signal external)
-        repo, num = X402_THREAD
-        r2 = sh(["gh","api",f"/repos/{repo}/issues/{num}/comments","--jq",
-                 '.[] | {id, user: .user.login, ts: .created_at, url: .html_url}'])
-        xseen = set(state.get("x402_comment_ids", []))
-        for line in r2.stdout.splitlines():
-            if not line.strip(): continue
-            c = json.loads(line)
-            if str(c["id"]) in xseen: continue
-            xseen.add(str(c["id"]))
-            if c["user"] != "javimosch" and not c["user"].endswith("[bot]"):
-                items.append({"channel":"github","kind":"x402-reply","from":c["user"],
-                              "title":f"comment on x402 PR #{num}","url":c["url"],"ts":c["ts"]})
-        state["x402_comment_ids"] = sorted(xseen)[-300:]
+        # 2. new comments on specific issue/PR threads you care about. A watched
+        #    thread is usually one where you left something and want the answer,
+        #    which GitHub's own notifications bury under subscribed-repo noise.
+        me = cfg("github.self", "")
+        for th in cfg("github.threads", []):
+            repo, num = th.get("repo"), th.get("number")
+            if not repo or not num:
+                continue
+            label = th.get("label") or f"{repo}#{num}"
+            r2 = sh(["gh","api",f"/repos/{repo}/issues/{num}/comments","--jq",
+                     '.[] | {id, user: .user.login, ts: .created_at, url: .html_url}'])
+            key = "thread_comment_ids"
+            xseen = set(state.get(key, state.get("x402_comment_ids", [])))
+            for line in r2.stdout.splitlines():
+                if not line.strip(): continue
+                c = json.loads(line)
+                if str(c["id"]) in xseen: continue
+                xseen.add(str(c["id"]))
+                if c["user"] != me and not c["user"].endswith("[bot]"):
+                    items.append({"channel":"github","kind":"thread-reply","from":c["user"],
+                                  "title":f"comment on {label}","url":c["url"],"ts":c["ts"]})
+            state[key] = sorted(xseen)[-300:]
     except Exception as e:
         err = f"github: {e}"
     return items, err
@@ -90,8 +129,10 @@ def zoho_check(state):
     pw = os.environ.get("ZOHO_IMAP_PASS")
     if not pw:
         return [], "zoho: set ZOHO_IMAP_PASS (Zoho app-specific password) to enable — see 'inbox-watch setup'"
-    user = os.environ.get("ZOHO_IMAP_USER","javi@intrane.fr")
-    host = os.environ.get("ZOHO_IMAP_HOST","imap.zoho.eu")
+    user = os.environ.get("ZOHO_IMAP_USER") or cfg("imap.user", "")
+    host = os.environ.get("ZOHO_IMAP_HOST") or cfg("imap.host", "imap.zoho.eu")
+    if not user:
+        return [], "imap: set ZOHO_IMAP_USER or imap.user in config.json"
     items = []
     try:
         M = imaplib.IMAP4_SSL(host, 993, ssl_context=ssl.create_default_context())
@@ -147,14 +188,13 @@ def classify_inbound(frm, subject):
     return "reply"
 
 def resend_check(state):
-    # Resend inbound: mail delivered to a receiving-enabled Resend domain
-    # (reply.intrane.fr) is pollable via GET /emails/inbound — no Zoho, we hold the key.
-    # Route outreach replies here by using reply-to replies@reply.intrane.fr (future sends),
-    # or a one-time Zoho forward javi@intrane.fr -> replies@reply.intrane.fr (past sends).
+    # Mail delivered to a receiving-enabled Resend domain is pollable via
+    # GET /emails/inbound. NOTE: RESEND_API_KEY can also SEND -- prefer the
+    # `mailbox` channel with a read-only token where one is available.
     import urllib.request
     key = os.environ.get("RESEND_API_KEY","")
     if not key:
-        return [], "resend: set RESEND_API_KEY to enable inbound polling (reply.intrane.fr receiving)"
+        return [], "resend: set RESEND_API_KEY to enable inbound polling"
     items = []
     try:
         # Resend 403s the default Python-urllib User-Agent — set a real one.
@@ -181,17 +221,18 @@ def resend_check(state):
     return items, None
 
 
-def intrane_inbox_check(state):
-    # machin-resend-inbox (inbox.intrane.fr) — the token-gated view of Resend
-    # inbound for the intrane.fr mailboxes (javi@, contact@). Preferred over the
-    # raw resend channel because it needs only INBOX_TOKEN, a read-scoped token,
-    # rather than RESEND_API_KEY, which can also SEND. The key stays on dk1.
+def mailbox_check(state):
+    # A token-gated inbound-mail service exposing GET /api/inbound
+    # (e.g. machin-resend-inbox). Preferred over the raw `resend` channel when
+    # available: it needs only a read-scoped token, whereas RESEND_API_KEY can
+    # also SEND -- so the notifier holds no authority to send mail as you.
     import urllib.request
     tok = os.environ.get("INBOX_TOKEN", "")
     if not tok:
-        return [], ("intrane-inbox: set INBOX_TOKEN to enable "
-                    "(read-only view of intrane.fr inbound; see ~/backups/dk1-machin-resend-inbox/access.txt)")
-    base = os.environ.get("INBOX_URL", "https://inbox.intrane.fr")
+        return [], "mailbox: set INBOX_TOKEN (read-only inbound token) to enable"
+    base = os.environ.get("INBOX_URL") or cfg("mailbox.url", "")
+    if not base:
+        return [], "mailbox: set INBOX_URL or mailbox.url in config.json"
     items = []
     try:
         req = urllib.request.Request(base + "/api/inbound",
@@ -200,7 +241,8 @@ def intrane_inbox_check(state):
         data = json.load(urllib.request.urlopen(req, timeout=30))
         if isinstance(data, dict):
             data = data.get("data") or data.get("inbound") or []
-        seen = set(state.get("intrane_inbox_ids", []))
+        # migrate the pre-rename cursor: losing it would re-alert the backlog
+        seen = set(state.get("mailbox_ids", state.get("intrane_inbox_ids", [])))
         newseen = list(seen)
         for e in data:
             eid = str(e.get("id") or (str(e.get("from", "")) + str(e.get("created_at", ""))))
@@ -211,24 +253,25 @@ def intrane_inbox_check(state):
             if isinstance(frm, dict):
                 frm = frm.get("email") or frm.get("address") or str(frm)
             subject = e.get("subject", "")
-            items.append({"channel": "intrane-inbox",
+            items.append({"channel": "mailbox",
                           "kind": classify_inbound(frm, subject),
                           "from": frm, "title": subject,
                           "url": base + "/?token=<token>",
                           "ts": e.get("created_at", "")})
-        state["intrane_inbox_ids"] = newseen[-1000:]
+        state["mailbox_ids"] = newseen[-1000:]
     except Exception as ex:
-        return [], f"intrane-inbox: {ex}"
+        return [], f"mailbox: {ex}"
     return items, None
 
 
 def linkedin_check(state):
     # No LinkedIn notifications API. The authed hidden-Edge/CDP session
-    # (~/.config/intrane-gtm/li_at) exists, but a notifications-page fetcher is not
+    # (linkedin.session_file) may exist, but a notifications-page fetcher is not
     # built. Enable by adding one (scrape /notifications via CDP) and wiring it here.
-    if os.path.exists(os.path.expanduser("~/.config/intrane-gtm/li_at")):
+    li = os.path.expanduser(cfg("linkedin.session_file", "~/.config/linkedin/li_at"))
+    if os.path.exists(li):
         return [], "linkedin: authed session present but no notifications fetcher yet — needs a CDP scraper of linkedin.com/notifications"
-    return [], "linkedin: no authed session (~/.config/intrane-gtm/li_at)"
+    return [], f"linkedin: no authed session ({li})"
 
 def main():
     peek = "--peek" in sys.argv
@@ -240,7 +283,7 @@ def main():
     human = "--human" in args
     state = load_state()
     all_items, errs = [], []
-    for fn in (gh_check, intrane_inbox_check, resend_check, zoho_check, linkedin_check):
+    for fn in (gh_check, mailbox_check, resend_check, zoho_check, linkedin_check):
         items, err = fn(state)
         all_items += items
         if err: errs.append(err)
@@ -268,32 +311,31 @@ def main():
         print()
     sys.exit(10 if all_items else 0)
 
-SETUP = """inbox-watch — enable each channel:
+SETUP = """inbox-watch — configure ~/.inbox-watch/config.json (see config.example.json),
+then enable each channel with its secret:
 
-  github    ready (uses `gh`, already authenticated). No setup.
-  intrane-inbox  export INBOX_TOKEN=<tok>   — polls inbox.intrane.fr (javi@/contact@
-            intrane.fr inbound) read-only. PREFER THIS over the resend channel: the
-            token cannot send, and RESEND_API_KEY can. Token: ~/backups/dk1-machin-resend-inbox/access.txt
-  --consumer NAME   use a separate cursor (~/.inbox-watch/state-NAME.json). REQUIRED
-            if more than one watcher polls the same inbox on one host: the cursor is
+  mailbox   export INBOX_TOKEN=<tok>       — a token-gated inbound service exposing
+            GET /api/inbound (e.g. machin-resend-inbox). Set mailbox.url in config
+            or INBOX_URL. PREFER THIS over `resend`: the token cannot send mail.
+  resend    export RESEND_API_KEY=<re_...> — Resend inbound. This key can also SEND.
+  imap      export ZOHO_IMAP_PASS=<app pw> — plus imap.user / imap.host in config.
+            Needs an app-specific password and IMAP enabled for that mailbox.
+  github    needs the authenticated `gh` CLI. Configure github.repos,
+            github.threads and github.self in config.json.
+  linkedin  not built (no notifications API); needs a session scraper.
+
+Flags:
+  --consumer NAME   separate cursor (~/.inbox-watch/state-NAME.json). REQUIRED if
+            more than one watcher polls the same source on one host: the cursor is
             consumed on read, so watchers sharing a state file steal each other's items.
   --state PATH      explicit cursor file (env: INBOX_WATCH_STATE)
-  --seed    mark everything currently pending as seen, reporting nothing. Run this
-            once when adding a new consumer, or it alerts on the whole backlog.
+  --seed    mark everything currently pending as seen, reporting nothing. Run once
+            when adding a consumer, or it alerts on the whole backlog.
+  --peek    report without marking seen — use for ANY diagnostic run, otherwise you
+            consume the alert your cron would have sent.
+  --human   readable lines instead of JSON.
 
-  --peek    report new items WITHOUT marking them seen — use this for any manual
-            or diagnostic run, otherwise you consume the cron's next alert.
-
-  resend    export RESEND_API_KEY=<re_...>  — polls Resend inbound (reply.intrane.fr,
-            receiving-enabled). The Zoho-free path: route replies here via reply-to
-            replies@reply.intrane.fr, or a one-time Zoho forward javi@ -> that address.
-  zoho      export ZOHO_IMAP_PASS=<app pw>  — IMAP fallback (needs per-user IMAP toggle
-            + username = the app-password owner, e.g. contact@intrane.fr). Painful; prefer resend.
-  linkedin  needs a notifications-page fetcher (CDP scraper of /notifications
-            using the existing ~/.config/intrane-gtm/li_at session). Not built.
-
-Run:  inbox-watch            # JSON of new items, exit 10 if any
-      inbox-watch --human    # readable
-Schedule (Telegram alert on new): cron/systemd-timer calling this + piping to a notifier."""
+Exit code: 10 if new items, 0 otherwise — so cron alerts only when something arrived.
+"""
 
 if __name__ == "__main__": main()

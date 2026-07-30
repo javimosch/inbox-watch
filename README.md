@@ -1,76 +1,88 @@
 # inbox-watch
 
-Non-interactive poller for the intrane outreach inboxes. Prints NEW items since the last
-run as JSON (or `--human`), exit **10** if any new items, else 0 — so a cron/timer can
-alert only when something actually arrives. State: `~/.inbox-watch/state.json`.
+**Tell me only when a human actually replied.**
 
-    inbox-watch            # JSON: {"new":[...],"count":N,"disabled":[...]}
-    inbox-watch --human    # readable lines
-    inbox-watch setup      # per-channel enablement instructions
+A non-interactive poller across GitHub, IMAP and Resend inbound. It prints what
+is new since the last run, and exits **10** if there was anything — so a cron job
+or systemd timer alerts you *only* when something real arrived.
+
+```console
+$ inbox-watch --human
+[mailbox/reply] yohji.sakamoto@gmail.com: Re: benchmark collaboration
+$ echo $?
+10
+```
+
+## The point is triage, not polling
+
+Inbound is mostly machine noise. On a domain with DMARC reporting on, aggregate
+reports outnumber real mail several to one; add out-of-office autoreplies and CI
+chatter and a naive notifier pings constantly. **A notifier that mostly cries wolf
+gets muted, and then the reply that mattered is muted with it.**
+
+So every item is classified, and only one kind is a person:
+
+| kind | what it is | alert? |
+|---|---|---|
+| `dmarc` | aggregate reports | no — counted, never pinged alone |
+| `autoreply` | out-of-office | yes, but **labelled**, so it doesn't read as a reply |
+| `reply` | a human typed something | **yes** — this is what the tool is for |
+
+## Install
+
+Single file, Python 3, no dependencies.
+
+```sh
+git clone https://github.com/javimosch/inbox-watch && cd inbox-watch
+install -m755 inbox-watch ~/.local/bin/inbox-watch
+mkdir -p ~/.inbox-watch && cp config.example.json ~/.inbox-watch/config.json
+$EDITOR ~/.inbox-watch/config.json
+inbox-watch setup          # what each channel needs
+```
+
+Config holds what to watch; **env vars hold every secret**.
 
 ## Channels
 
-| Channel | Status | Needs |
+| Channel | Needs | Notes |
 |---|---|---|
-| **github** | ✅ working now | nothing — uses the authenticated `gh` CLI. Surfaces inbound only (mention/comment/review_requested/team_mention + new non-bot comments on the x402 PR #2612 thread); drops CI/self-authored/subscribed noise. |
-| **intrane-inbox** (javi@/contact@intrane.fr) | ✅ working | `export INBOX_TOKEN=<tok>` — read-only view of Resend inbound via inbox.intrane.fr. **Prefer this over `resend`**: the token cannot send, `RESEND_API_KEY` can. Token in `~/backups/dk1-machin-resend-inbox/access.txt`. |
-| **zoho** (javi@intrane.fr) | ⚙️ needs a credential | `export ZOHO_IMAP_PASS=<Zoho app-specific password>` (Zoho Mail → Settings → Security → App Passwords; IMAP ON). Then polls UNSEEN INBOX over IMAPS (imap.zoho.eu:993), skips no-reply/digest mail. This is where cold-email replies land. |
-| **linkedin** | 🚧 not built | LinkedIn has no notifications API. The authed session exists (`~/.config/intrane-gtm/li_at`), but a CDP scraper of `linkedin.com/notifications` needs writing before reply/reaction-watching works. |
+| **mailbox** | `INBOX_TOKEN` + `mailbox.url` | A token-gated service exposing `GET /api/inbound` (e.g. [machin-resend-inbox](https://github.com/javimosch/machin-resend-inbox)). **Preferred over `resend`** — a read-only token cannot send mail as you. |
+| **resend** | `RESEND_API_KEY` | Resend inbound directly. Note this key *can also send*. |
+| **imap** | `ZOHO_IMAP_PASS` + `imap.user` | Any IMAP host; needs an app-specific password. |
+| **github** | authenticated `gh` | Mentions/review-requests, plus specific issue/PR **threads** you name — the ones GitHub buries under subscribed-repo noise. |
+| **linkedin** | — | Not built (no notifications API). |
 
-## What I need to actually watch your inboxes
+Unconfigured channels report *why* they're disabled rather than failing.
 
-- **GitHub:** nothing — already live.
-- **Zoho (the important one — outreach replies):** a **Zoho app-specific password**. That's the single missing credential. With it, `inbox-watch` sees replies to your 31 cold emails non-interactively.
-- **LinkedIn:** a bit of code (a notifications-page CDP fetcher), plus the session already present.
+## Two traps worth knowing
 
-## Deployment (live)
+Both were found the hard way, in production.
 
-dk1: `/opt/inbox-watch/`, `inbox-watch.timer` every 15 min → Telegram. Uses the
-**intrane-inbox** channel (read-only `INBOX_TOKEN`), not `RESEND_API_KEY` — the
-notifier holds no send authority. Telegram delivery is logged to journald
-(`inbox-watch: telegram delivered`), so a broken alert path is visible instead of
-silent.
+**The cursor is consumed on read.** Any run marks items seen — so a manual
+diagnostic run *eats the alert your cron would have sent*. Use `--peek` for
+anything diagnostic; it reports without committing state.
 
-**Multiple watchers on one host need `--consumer`.** The cursor is consumed on
-read, so two watchers sharing a state file steal each other's items — the second
-to poll sees nothing and its alert never fires. `--consumer NAME` gives each its
-own cursor (`~/.inbox-watch/state-NAME.json`); `--state PATH` / `INBOX_WATCH_STATE`
-set one explicitly. Run `--seed` once for a new consumer or it alerts on the whole
-backlog. The default path is unchanged, so an existing deployment keeps its cursor.
+**Two watchers on one host steal from each other.** Same cause: they share a
+cursor, so whichever polls first wins and the other's alert never fires. Give
+each its own with `--consumer NAME`, and run `--seed` once so a new consumer
+doesn't alert on the entire backlog.
 
-**Diagnosing a live watcher: always use `--peek`.** A bare run marks items seen,
-so a manual debug run consumes the alert the cron would have sent. This is not
-theoretical — a verification loop that polled twice per iteration swallowed its
-own test alert and looked like a clean pass.
+```sh
+inbox-watch --peek --human            # diagnose safely
+inbox-watch --consumer laptop --seed  # add a second watcher
+inbox-watch --consumer laptop
+```
 
-## Wire it to alert (optional)
+## Wire it to alert
 
-    */15 * * * *  inbox-watch --human | grep . && <notify: telegram/relais/email>
+```
+*/15 * * * *  inbox-watch --human | grep . && <notify: telegram / webhook / mail>
+```
 
-Or a systemd timer. Pipe new items to the perrus Telegram bot or POST them to a relais inbox.
+`run.sh.template` is a worked example: poll, drop DMARC, label autoreplies, push
+real replies to Telegram — and **log the delivery result**, because a send that
+fails silently is the same failure mode this tool exists to prevent.
 
-## Inbound classification (2026-07-28)
+## Licence
 
-Not all inbound mail deserves an interruption. `classify_inbound()` sorts it into three kinds and
-`run.sh` decides what to send:
-
-| kind | what it is | notified? |
-|---|---|---|
-| `dmarc` | machine-generated aggregate reports | **no** — counted, and appended to a ping you were getting anyway |
-| `autoreply` | out-of-office | yes, but **labelled** `[auto-reply]` so it doesn't read as a reply |
-| `reply` | a person typed something | yes — this is what the tool is for |
-
-Three of four consecutive pings had been DMARC reports. An alert channel earns its attention by
-being quiet when there is nothing to say; one that mostly cries wolf gets muted, and then the
-reply that mattered is muted with it.
-
-The **poller still reports everything** — the split is a notification policy, not data loss. A
-jump in the suppressed DMARC count is itself a deliverability signal, which is why it rides along
-on pings rather than being discarded.
-
-An item with **no** `kind` is treated as a real reply: an older poller or a new channel must fail
-loud, never be silently swallowed.
-
-`run.sh.template` is the versioned copy; the deployed `/opt/inbox-watch/run.sh` has the secrets
-filled in. (Those secrets are inline in the deployed script — worth moving to an env file
-someday, but not changed here.)
+MIT.
