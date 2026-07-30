@@ -17,6 +17,24 @@ State:  ~/.inbox-watch/state.json, or per-consumer via --consumer NAME."""
 import os, sys, json, subprocess, datetime, imaplib, email, ssl
 from email.header import decode_header
 
+VERSION = "1.0.0"
+
+# ---- agent-first output contract (cli-output-spec) -----------------------
+# stdout = data only, versioned JSON. stderr = context and typed errors.
+# Exit: 0 success, 10 success WITH new items (the cron signal this tool exists
+# for), 80 input/validation, 90 precondition/resource, 100 external/integration,
+# 110 internal. No internal retries -- a caller decides whether to retry.
+EXIT_OK, EXIT_NEW = 0, 10
+EXIT_INPUT, EXIT_PRECOND, EXIT_EXTERNAL, EXIT_INTERNAL = 80, 90, 100, 110
+
+def die(code, type_, message, recoverable=True, suggestions=None):
+    """Typed error on stderr, nothing on stdout, semantic exit code."""
+    json.dump({"ok": False, "error": {
+        "code": code, "type": type_, "message": message,
+        "recoverable": recoverable, "suggestions": suggestions or []}}, sys.stderr)
+    sys.stderr.write("\n")
+    sys.exit(code)
+
 # Cursor state. ONE file per consumer, because the cursor is per-consumer by
 # nature: reading an item marks it seen, so two watchers sharing a file steal
 # each other's items -- the second to poll sees nothing and its alert never
@@ -47,10 +65,14 @@ CONFIG_PATH = os.path.expanduser(
     os.environ.get("INBOX_WATCH_CONFIG", "~/.inbox-watch/config.json"))
 
 def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        return {}          # absent is fine: channels report what they need
     try:
         return json.load(open(CONFIG_PATH))
-    except Exception:
-        return {}
+    except Exception as e:
+        die(EXIT_INPUT, "config_invalid", f"{CONFIG_PATH}: {e}",
+            suggestions=[f"validate with: python3 -m json.tool {CONFIG_PATH}",
+                         "compare against config.example.json"])
 
 CFG = load_config()
 
@@ -280,6 +302,18 @@ def main():
     args = sys.argv[1:]
     if args and args[0] == "setup":
         print(SETUP); return
+    if args and args[0] == "help-json":
+        json.dump(HELP_JSON, sys.stdout, indent=2); print(); sys.exit(EXIT_OK)
+    if args and args[0] == "guide":
+        if "--human" in args:
+            print(GUIDE["summary"]); print()
+            for k in ("model", "loop"):
+                print(k + ":"); [print("  - " + x) for x in GUIDE[k]]; print()
+            print("gotchas:"); [print("  - " + x) for x in GUIDE["gotchas"]]
+        else:
+            json.dump(GUIDE, sys.stdout, indent=2); print()
+        sys.exit(EXIT_OK)
+
     human = "--human" in args
     state = load_state()
     all_items, errs = [], []
@@ -299,17 +333,84 @@ def main():
         # otherwise alert on the entire backlog on its first run.
         print(f"seeded {len(all_items)} item(s) as seen -> {STATE}")
         sys.exit(0)
+    # A disabled channel is context, not failure: the other channels still ran.
+    # Reported as structured entries so an agent can act on the reason instead
+    # of regex-ing prose.
+    disabled = []
+    for e in errs:
+        chan, _, reason = str(e).partition(":")
+        disabled.append({"channel": chan.strip(), "reason": reason.strip() or str(e),
+                         "recoverable": True})
     if human:
         if all_items:
             for it in all_items:
                 print(f"[{it['channel']}/{it['kind']}] {it['from']}: {it['title']}  {it['url']}")
         else:
             print("no new items")
-        for e in errs: print(f"  (disabled) {e}", file=sys.stderr)
+        for d in disabled:
+            print(f"  (disabled) {d['channel']}: {d['reason']}", file=sys.stderr)
     else:
-        json.dump({"new": all_items, "count": len(all_items), "disabled": errs}, sys.stdout, indent=2)
+        json.dump({"ok": True, "version": VERSION, "new": all_items,
+                   "count": len(all_items), "disabled": disabled},
+                  sys.stdout, indent=2)
         print()
-    sys.exit(10 if all_items else 0)
+    # 10 = "something arrived" so a cron can alert on exit status alone.
+    sys.exit(EXIT_NEW if all_items else EXIT_OK)
+
+
+HELP_JSON = {
+    "version": VERSION,
+    "output": "json",
+    "interactive": False,
+    "commands": {
+        "(default)": {"args": [], "flags": ["--human", "--peek", "--seed",
+                                            "--consumer <name>", "--state <path>"],
+                      "notes": "poll every configured channel; exit 10 if anything new"},
+        "help-json": {"args": [], "notes": "this catalog"},
+        "guide":     {"args": [], "flags": ["--human"], "notes": "embedded operator manual"},
+        "setup":     {"args": [], "notes": "what each channel needs, as text"},
+    },
+    "exit_codes": {
+        "0":   "success — nothing new",
+        "10":  "success — new items found (the cron signal)",
+        "80":  "input/validation (bad config)",
+        "90":  "precondition/resource",
+        "100": "external/integration",
+        "110": "internal",
+    },
+    "env": ["INBOX_TOKEN", "INBOX_URL", "RESEND_API_KEY", "ZOHO_IMAP_PASS",
+            "ZOHO_IMAP_USER", "ZOHO_IMAP_HOST", "INBOX_WATCH_CONFIG",
+            "INBOX_WATCH_STATE"],
+}
+
+GUIDE = {
+    "version": VERSION,
+    "summary": ("inbox-watch tells you only when a HUMAN replied. It polls GitHub, "
+                "IMAP and Resend inbound, classifies every item, and exits 10 when "
+                "something real arrived — so a cron alerts only then."),
+    "model": [
+        "A cursor per consumer records what has been seen. Reading ADVANCES it.",
+        "Each channel is independent: one being unconfigured never fails the others.",
+        "Classification is the product: dmarc / autoreply / reply. Only `reply` is a person.",
+        "stdout is data, stderr is context and typed errors, exit code is the signal.",
+    ],
+    "loop": [
+        "cp config.example.json ~/.inbox-watch/config.json and edit what to watch",
+        "export the secrets each channel needs (see `setup`)",
+        "inbox-watch --peek --human   # confirm it sees things, WITHOUT consuming",
+        "wire a cron/timer on exit code 10",
+    ],
+    "gotchas": [
+        "The cursor is consumed on read: a bare diagnostic run EATS the alert your cron would have sent. Use --peek.",
+        "Two watchers on one host steal each other's items. Give each --consumer NAME.",
+        "A new consumer alerts on the whole backlog unless you --seed it once.",
+        "Exit 10 is success-with-items, not an error. Errors are 80/90/100/110.",
+        "RESEND_API_KEY can SEND mail; prefer the mailbox channel's read-only INBOX_TOKEN.",
+        "A notifier that pings for DMARC noise gets muted, and the reply that mattered is muted with it.",
+    ],
+    "see_also": ["inbox-watch help-json", "inbox-watch setup",
+                 "https://github.com/javimosch/inbox-watch"],
+}
 
 SETUP = """inbox-watch — configure ~/.inbox-watch/config.json (see config.example.json),
 then enable each channel with its secret:

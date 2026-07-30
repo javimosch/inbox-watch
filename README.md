@@ -73,6 +73,39 @@ inbox-watch --consumer laptop --seed  # add a second watcher
 inbox-watch --consumer laptop
 ```
 
+## Agent-first output contract
+
+Follows [cli-output-spec](https://cli-specs.intrane.fr/): **stdout is data**
+(versioned JSON), **stderr is context and typed errors**, and the exit code is
+the signal.
+
+```console
+$ inbox-watch                     # stdout
+{ "ok": true, "version": "1.0.0", "new": [ ... ], "count": 1,
+  "disabled": [ { "channel": "resend", "reason": "set RESEND_API_KEY …", "recoverable": true } ] }
+
+$ inbox-watch help-json           # command catalog
+$ inbox-watch guide               # embedded operator manual
+```
+
+| exit | meaning |
+|---:|---|
+| `0` | success — nothing new |
+| `10` | success — **new items** (the cron signal) |
+| `80` | input/validation (bad config) |
+| `90` | precondition/resource |
+| `100` | external/integration |
+| `110` | internal |
+
+Errors are typed, on stderr, with `recoverable` and `suggestions`:
+
+```json
+{"ok":false,"error":{"code":80,"type":"config_invalid","message":"…",
+ "recoverable":true,"suggestions":["validate with: python3 -m json.tool …"]}}
+```
+
+No internal retries — the caller decides.
+
 ## Wire it to alert
 
 ```
