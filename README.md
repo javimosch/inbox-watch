@@ -116,6 +116,18 @@ No internal retries — the caller decides.
 real replies to Telegram — and **log the delivery result**, because a send that
 fails silently is the same failure mode this tool exists to prevent.
 
+## supercli plugin
+
+```sh
+supercli plugins install ./plugin --on-conflict replace --json
+supercli inbox-watch inbox peek      # safe diagnosis
+supercli inbox-watch inbox check     # consumes the cursor
+supercli inbox-watch self guide
+```
+
+`inbox check` and `inbox peek` are separate commands on purpose: the destructive
+one should never be the one you reach for while debugging.
+
 ## Licence
 
 MIT.
