@@ -211,6 +211,8 @@ def linkedin_check(state):
     return [], "linkedin: no authed session (~/.config/intrane-gtm/li_at)"
 
 def main():
+    peek = "--peek" in sys.argv
+
     args = sys.argv[1:]
     if args and args[0] == "setup":
         print(SETUP); return
@@ -221,7 +223,13 @@ def main():
         items, err = fn(state)
         all_items += items
         if err: errs.append(err)
-    save_state(state)
+    # --peek reports WITHOUT committing state. Running the poller is otherwise
+    # destructive to the alert path: it marks items seen, so a manual debug run
+    # silently eats the notification the cron would have sent. Found the hard
+    # way -- a verification loop that polled twice per iteration swallowed its
+    # own test alert.
+    if not peek:
+        save_state(state)
     if human:
         if all_items:
             for it in all_items:
@@ -240,6 +248,9 @@ SETUP = """inbox-watch — enable each channel:
   intrane-inbox  export INBOX_TOKEN=<tok>   — polls inbox.intrane.fr (javi@/contact@
             intrane.fr inbound) read-only. PREFER THIS over the resend channel: the
             token cannot send, and RESEND_API_KEY can. Token: ~/backups/dk1-machin-resend-inbox/access.txt
+  --peek    report new items WITHOUT marking them seen — use this for any manual
+            or diagnostic run, otherwise you consume the cron's next alert.
+
   resend    export RESEND_API_KEY=<re_...>  — polls Resend inbound (reply.intrane.fr,
             receiving-enabled). The Zoho-free path: route replies here via reply-to
             replies@reply.intrane.fr, or a one-time Zoho forward javi@ -> that address.
