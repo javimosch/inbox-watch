@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """inbox-watch — non-interactive poller for the intrane outreach inboxes.
 Prints NEW items since last run (JSON by default). Exit 10 if new items found, else 0.
-Channels: github (ready), zoho (needs ZOHO_IMAP_PASS), linkedin (needs notif fetcher).
+Channels: github (ready), intrane-inbox (needs INBOX_TOKEN), resend (needs RESEND_API_KEY),
+zoho (needs ZOHO_IMAP_PASS), linkedin (needs notif fetcher).
 State: ~/.inbox-watch/state.json (per-channel last-seen marker)."""
 import os, sys, json, subprocess, datetime, imaplib, email, ssl
 from email.header import decode_header
@@ -159,6 +160,48 @@ def resend_check(state):
         return [], f"resend: {ex}"
     return items, None
 
+
+def intrane_inbox_check(state):
+    # machin-resend-inbox (inbox.intrane.fr) — the token-gated view of Resend
+    # inbound for the intrane.fr mailboxes (javi@, contact@). Preferred over the
+    # raw resend channel because it needs only INBOX_TOKEN, a read-scoped token,
+    # rather than RESEND_API_KEY, which can also SEND. The key stays on dk1.
+    import urllib.request
+    tok = os.environ.get("INBOX_TOKEN", "")
+    if not tok:
+        return [], ("intrane-inbox: set INBOX_TOKEN to enable "
+                    "(read-only view of intrane.fr inbound; see ~/backups/dk1-machin-resend-inbox/access.txt)")
+    base = os.environ.get("INBOX_URL", "https://inbox.intrane.fr")
+    items = []
+    try:
+        req = urllib.request.Request(base + "/api/inbound",
+                                     headers={"Authorization": "Bearer " + tok,
+                                              "User-Agent": "inbox-watch/1.0"})
+        data = json.load(urllib.request.urlopen(req, timeout=30))
+        if isinstance(data, dict):
+            data = data.get("data") or data.get("inbound") or []
+        seen = set(state.get("intrane_inbox_ids", []))
+        newseen = list(seen)
+        for e in data:
+            eid = str(e.get("id") or (str(e.get("from", "")) + str(e.get("created_at", ""))))
+            if eid in seen:
+                continue
+            newseen.append(eid)
+            frm = e.get("from", "")
+            if isinstance(frm, dict):
+                frm = frm.get("email") or frm.get("address") or str(frm)
+            subject = e.get("subject", "")
+            items.append({"channel": "intrane-inbox",
+                          "kind": classify_inbound(frm, subject),
+                          "from": frm, "title": subject,
+                          "url": base + "/?token=<token>",
+                          "ts": e.get("created_at", "")})
+        state["intrane_inbox_ids"] = newseen[-1000:]
+    except Exception as ex:
+        return [], f"intrane-inbox: {ex}"
+    return items, None
+
+
 def linkedin_check(state):
     # No LinkedIn notifications API. The authed hidden-Edge/CDP session
     # (~/.config/intrane-gtm/li_at) exists, but a notifications-page fetcher is not
@@ -174,7 +217,7 @@ def main():
     human = "--human" in args
     state = load_state()
     all_items, errs = [], []
-    for fn in (gh_check, resend_check, zoho_check, linkedin_check):
+    for fn in (gh_check, intrane_inbox_check, resend_check, zoho_check, linkedin_check):
         items, err = fn(state)
         all_items += items
         if err: errs.append(err)
@@ -194,6 +237,9 @@ def main():
 SETUP = """inbox-watch — enable each channel:
 
   github    ready (uses `gh`, already authenticated). No setup.
+  intrane-inbox  export INBOX_TOKEN=<tok>   — polls inbox.intrane.fr (javi@/contact@
+            intrane.fr inbound) read-only. PREFER THIS over the resend channel: the
+            token cannot send, and RESEND_API_KEY can. Token: ~/backups/dk1-machin-resend-inbox/access.txt
   resend    export RESEND_API_KEY=<re_...>  — polls Resend inbound (reply.intrane.fr,
             receiving-enabled). The Zoho-free path: route replies here via reply-to
             replies@reply.intrane.fr, or a one-time Zoho forward javi@ -> that address.

@@ -13,6 +13,7 @@ alert only when something actually arrives. State: `~/.inbox-watch/state.json`.
 | Channel | Status | Needs |
 |---|---|---|
 | **github** | ✅ working now | nothing — uses the authenticated `gh` CLI. Surfaces inbound only (mention/comment/review_requested/team_mention + new non-bot comments on the x402 PR #2612 thread); drops CI/self-authored/subscribed noise. |
+| **intrane-inbox** (javi@/contact@intrane.fr) | ✅ working | `export INBOX_TOKEN=<tok>` — read-only view of Resend inbound via inbox.intrane.fr. **Prefer this over `resend`**: the token cannot send, `RESEND_API_KEY` can. Token in `~/backups/dk1-machin-resend-inbox/access.txt`. |
 | **zoho** (javi@intrane.fr) | ⚙️ needs a credential | `export ZOHO_IMAP_PASS=<Zoho app-specific password>` (Zoho Mail → Settings → Security → App Passwords; IMAP ON). Then polls UNSEEN INBOX over IMAPS (imap.zoho.eu:993), skips no-reply/digest mail. This is where cold-email replies land. |
 | **linkedin** | 🚧 not built | LinkedIn has no notifications API. The authed session exists (`~/.config/intrane-gtm/li_at`), but a CDP scraper of `linkedin.com/notifications` needs writing before reply/reaction-watching works. |
 
