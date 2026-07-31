@@ -298,6 +298,11 @@ def linkedin_check(state):
 def main():
     peek = "--peek" in sys.argv
     seed = "--seed" in sys.argv
+    # --exit-zero: always exit 0 on success, even with new items. Exit 10 is a
+    # signal for shell callers (cron); a JSON consumer reads `count` instead,
+    # and many runners treat ANY non-zero exit as a failure -- which would turn
+    # the one case that matters, mail arrived, into an error.
+    exit_zero = "--exit-zero" in sys.argv
 
     args = sys.argv[1:]
     if args and args[0] == "setup":
@@ -355,7 +360,7 @@ def main():
                   sys.stdout, indent=2)
         print()
     # 10 = "something arrived" so a cron can alert on exit status alone.
-    sys.exit(EXIT_NEW if all_items else EXIT_OK)
+    sys.exit(EXIT_OK if exit_zero else (EXIT_NEW if all_items else EXIT_OK))
 
 
 HELP_JSON = {
@@ -363,7 +368,7 @@ HELP_JSON = {
     "output": "json",
     "interactive": False,
     "commands": {
-        "(default)": {"args": [], "flags": ["--human", "--peek", "--seed",
+        "(default)": {"args": [], "flags": ["--human", "--peek", "--seed", "--exit-zero",
                                             "--consumer <name>", "--state <path>"],
                       "notes": "poll every configured channel; exit 10 if anything new"},
         "help-json": {"args": [], "notes": "this catalog"},

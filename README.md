@@ -97,6 +97,9 @@ $ inbox-watch guide               # embedded operator manual
 | `100` | external/integration |
 | `110` | internal |
 
+`--exit-zero` forces 0 on success for runners that treat any non-zero exit as a
+failure; read `count` instead.
+
 Errors are typed, on stderr, with `recoverable` and `suggestions`:
 
 ```json
@@ -119,7 +122,7 @@ fails silently is the same failure mode this tool exists to prevent.
 ## supercli plugin
 
 ```sh
-supercli plugins install ./plugin --on-conflict replace --json
+supercli plugins install ./plugin --on-conflict replace --json   # or: supercli/pull/363
 supercli inbox-watch inbox peek      # safe diagnosis
 supercli inbox-watch inbox check     # consumes the cursor
 supercli inbox-watch self guide

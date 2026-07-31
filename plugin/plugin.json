@@ -1,10 +1,13 @@
 {
   "name": "inbox-watch",
   "version": "1.0.0",
-  "description": "Tell me only when a human actually replied — poll GitHub/IMAP/Resend inbound, classify DMARC vs autoreply vs reply, exit 10 when something real arrived",
+  "description": "Tell me only when a human actually replied \u2014 poll GitHub/IMAP/Resend inbound, classify DMARC vs autoreply vs reply, exit 10 when something real arrived",
   "source": "https://github.com/javimosch/inbox-watch",
   "checks": [
-    { "type": "binary", "name": "inbox-watch" }
+    {
+      "type": "binary",
+      "name": "inbox-watch"
+    }
   ],
   "install_guidance": {
     "plugin": "inbox-watch",
@@ -28,12 +31,15 @@
       "namespace": "inbox-watch",
       "resource": "inbox",
       "action": "check",
-      "description": "Poll every configured channel and print items new since the last run. Exit 10 if any. CONSUMES the cursor — use inbox_peek to diagnose.",
+      "description": "Poll every configured channel and print items new since the last run. Exit 10 if any. CONSUMES the cursor \u2014 use inbox_peek to diagnose.",
       "adapter": "process",
       "adapterConfig": {
         "command": "inbox-watch",
-        "baseArgs": [],
-        "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch"
+        "baseArgs": [
+          "--exit-zero"
+        ],
+        "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch",
+        "note": "--exit-zero because a non-zero exit is treated as failure by the process adapter, and inbox-watch's exit 10 means 'new items' \u2014 a success. Read data.count instead."
       },
       "args": []
     },
@@ -45,8 +51,12 @@
       "adapter": "process",
       "adapterConfig": {
         "command": "inbox-watch",
-        "baseArgs": ["--peek"],
-        "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch"
+        "baseArgs": [
+          "--peek",
+          "--exit-zero"
+        ],
+        "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch",
+        "note": "--exit-zero because a non-zero exit is treated as failure by the process adapter, and inbox-watch's exit 10 means 'new items' \u2014 a success. Read data.count instead."
       },
       "args": []
     },
@@ -58,8 +68,12 @@
       "adapter": "process",
       "adapterConfig": {
         "command": "inbox-watch",
-        "baseArgs": ["--seed"],
-        "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch"
+        "baseArgs": [
+          "--seed",
+          "--exit-zero"
+        ],
+        "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch",
+        "note": "--exit-zero because a non-zero exit is treated as failure by the process adapter, and inbox-watch's exit 10 means 'new items' \u2014 a success. Read data.count instead."
       },
       "args": []
     },
@@ -71,7 +85,9 @@
       "adapter": "process",
       "adapterConfig": {
         "command": "inbox-watch",
-        "baseArgs": ["guide"],
+        "baseArgs": [
+          "guide"
+        ],
         "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch"
       },
       "args": []
@@ -84,7 +100,9 @@
       "adapter": "process",
       "adapterConfig": {
         "command": "inbox-watch",
-        "baseArgs": ["help-json"],
+        "baseArgs": [
+          "help-json"
+        ],
         "missingDependencyHelp": "Install: see https://github.com/javimosch/inbox-watch"
       },
       "args": []
